@@ -7,7 +7,7 @@ const { StatusCodes } = require('http-status-codes');
 const sendVerificationEmail = require('../utils/sendVerficationEmail.js');
 const path= require('path')
 const {appPath} =require('../app.js')
-let Id;//Test 1
+let Id;//Test 2
 
 // Generate a JWT
 //When generating the token always the first parameter is the id(how to access the user) in an object
