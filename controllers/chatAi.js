@@ -5,7 +5,7 @@ const { StatusCodes } = require('http-status-codes');
 const User = require('../models/User');
 const Post = require('../models/Posts');
 const Chat = require('../models/chatAi');
-const UserChats = require('../models/UserChatAi');
+const UserChats = require('../models/userChatAi');
 const ImageKit = require("imagekit");
 const imagekit = new ImageKit({
     urlEndpoint: process.env.IMAGE_KIT_ENDPOINT,
