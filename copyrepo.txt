@@ -1,0 +1,48 @@
+Inorder to copy code use this:
+
+$sourceUser = "abakahjay"
+$targetUser = "abakahjayy"
+
+$repos = gh repo list $sourceUser --limit 1000 --json name -q '.[].name'
+
+foreach ($repo in $repos) {
+    Write-Host "=============================="
+    Write-Host "Processing $repo..."
+    Write-Host "=============================="
+
+    # Create repo on target account
+    Write-Host "Creating repo on target account..."
+    gh repo create "$targetUser/$repo" --public
+
+    # Clone if not already cloned
+    if (!(Test-Path $repo)) {
+        Write-Host "Cloning $repo..."
+        git clone "https://github.com/$sourceUser/$repo.git"
+    }
+
+    if (!(Test-Path $repo)) {
+        Write-Host "❌ Clone failed, skipping $repo"
+        continue
+    }
+
+    Set-Location $repo
+
+    $branch = git branch --show-current
+    if ($branch -eq "") {
+        Write-Host "⚠️ No branch, skipping $repo"
+        Set-Location ..
+        continue
+    }
+
+    git remote remove origin 2>$null
+    git remote add origin "https://github.com/$targetUser/$repo.git"
+
+    git push -u origin --all
+    git push -u origin --tags
+
+    Set-Location ..
+    Write-Host "✅ Done: https://github.com/$targetUser/$repo"
+}
+
+Write-Host ""
+Write-Host "✅ ALL REPOS MIGRATED"

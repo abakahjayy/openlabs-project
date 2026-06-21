@@ -201,6 +201,7 @@ const start = async () => {
         //Connect the Database
         //We must always include our connect database method in the server application
         await connectDB(process.env.MONGO_URI).then(() => {
+            console.log('\x1b[36m%s\x1b[0m',`Database connected: ${process.env.MONGO_URI}`)
             console.log('\x1b[36m%s\x1b[0m','Connected to MongoDB...')
         })
 
