@@ -17,41 +17,64 @@ const { appPath } = require('../app.js');
 // SIGN UP
 // =========================
 const signUp = async (req, res) => {
-    const { firstName, lastName, username, email, password } = req.body;
+    const {
+        firstName, lastName, username, email, // old (email-based) app
+        name, phone, role, region,            // new (phone-based) app
+        password,
+    } = req.body;
+
+    if (!password) {
+        throw new BadRequestError('Password is required');
+    }
+
+    const isEmailFlow = !!email;
+    const isPhoneFlow = !!phone;
+
+    if (!isEmailFlow && !isPhoneFlow) {
+        throw new BadRequestError('Please provide either an email or a phone number');
+    }
+
+    const resolvedName = name || [firstName, lastName].filter(Boolean).join(' ') || username;
+    console.log(`\x1b[32m%s\x1b[0m`, `Resolved name: ${resolvedName}`);
 
     const newUser = await User.create({
         firstName,
         lastName,
-        username,
+        username: resolvedName,
         email,
+        phone,
+        name: resolvedName,
+        role,
+        region,
         password,
-        isVerified: false,
+        // No email to verify in the phone-first flow, so treat as verified.
+        isVerified: isEmailFlow ? false : true,
         created: new Date(),
     });
 
     const userId = newUser._id.toString();
-
     const token = newUser.createJWT();
 
-    const verificationToken = jwt.sign(
-        { email },
-        process.env.JWT_SECRET,
-        { expiresIn: '30d' }
-    );
-
     newUser.tokens.push(token);
-    await newUser.save(); // ✅ FIXED
+    await newUser.save();
 
-    const origin = `${req.protocol}://${req.get('host')}`;
+    if (isEmailFlow) {
+        const verificationToken = jwt.sign(
+            { email },
+            process.env.JWT_SECRET,
+            { expiresIn: '30d' }
+        );
 
-    await sendVerificationEmail({
-        name: username,
-        email,
-        verificationToken,
-        origin,
-    });
+        const origin = `${req.protocol}://${req.get('host')}`;
 
-    // ✅ FIXED COOKIE (string only)
+        await sendVerificationEmail({
+            name: username || resolvedName,
+            email,
+            verificationToken,
+            origin,
+        });
+    }
+
     res.cookie(`authToken-${userId}`, token, {
         httpOnly: true,
         sameSite: "Lax",
@@ -67,7 +90,18 @@ const signUp = async (req, res) => {
     return res.status(StatusCodes.CREATED).json({
         message: "User registered successfully!",
         token,
-        userId
+        userId, // top-level, for the old app
+        user: {  // nested, for the new app (needs user.role)
+            id: userId,
+            name: resolvedName,
+            firstName,
+            lastName,
+            username,
+            email,
+            phone,
+            role,
+            region,
+        },
     });
 };
 
@@ -76,16 +110,18 @@ const signUp = async (req, res) => {
 // LOGIN
 // =========================
 const login = async (req, res) => {
-    const { email, password } = req.body;
+    const { email, phone, password } = req.body;
 
-    if (!email || !password) {
-        throw new BadRequestError('Please provide email and password');
+    if (!password || (!email && !phone)) {
+        throw new BadRequestError('Please provide a password and either an email or a phone number');
     }
 
-    const user = await User.findOne({ email });
+    const user = email
+        ? await User.findOne({ email })
+        : await User.findOne({ phone });
 
     if (!user) {
-        throw new UnauthenticatedError("Invalid email.");
+        throw new UnauthenticatedError(email ? "Invalid email." : "Invalid phone number.");
     }
 
     const isPasswordCorrect = await user.comparePasswords(password);
@@ -97,7 +133,7 @@ const login = async (req, res) => {
     const token = user.createJWT();
 
     user.tokens.push(token);
-    await user.save(); // ✅ FIXED
+    await user.save();
 
     const userId = user._id.toString();
 
@@ -116,7 +152,18 @@ const login = async (req, res) => {
     return res.status(StatusCodes.OK).json({
         message: "Login successful!",
         token,
-        userId
+        userId, // top-level, for the old app
+        user: {  // nested, for the new app
+            id: userId,
+            name: user.name || [user.firstName, user.lastName].filter(Boolean).join(' '),
+            firstName: user.firstName,
+            lastName: user.lastName,
+            username: user.username,
+            email: user.email,
+            phone: user.phone,
+            role: user.role,
+            region: user.region,
+        },
     });
 };
 
@@ -181,7 +228,6 @@ const logout = async (req, res) => {
         throw new UnauthenticatedError('Invalid userId');
     }
 
-    // optional but recommended
     user.tokens = [];
     await user.save();
 
@@ -189,7 +235,7 @@ const logout = async (req, res) => {
     res.clearCookie(`User-${userId}`);
 
     return res.status(StatusCodes.OK).json({
-        message: `Successfully logged out: ${user.firstName}`
+        message: `Successfully logged out: ${user.name || user.firstName || ''}`.trim()
     });
 };
 
