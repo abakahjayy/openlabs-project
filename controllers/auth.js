@@ -40,7 +40,7 @@ const signUp = async (req, res) => {
     const newUser = await User.create({
         firstName,
         lastName,
-        username: resolvedName,
+        username,
         email,
         phone,
         name: resolvedName,
