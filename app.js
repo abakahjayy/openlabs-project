@@ -56,9 +56,21 @@ app.use(cors());//This allows connections from other ports
 
 
 // Serve the uploaded images from the /uploads folder in code
+// Serve the uploaded images from the /uploads folder in code
 app.use("/api/v1/auth/", uploadRoutes);
 
-app.use(bodyParser.json());
+// IMPORTANT: this must be registered BEFORE bodyParser.json()/express.json()
+// below. Paystack's webhook signature is an HMAC over the raw request bytes —
+// once a JSON parser has already turned the body into a JS object, the exact
+// original bytes are gone and the signature can no longer be verified.
+app.use('/api/v1/payments/webhook', express.raw({ type: 'application/json' }));
+
+app.use((req, res, next) => {
+    if (req.originalUrl === '/api/v1/payments/webhook') {
+        return next(); // already raw-parsed above; don't let this overwrite req.body
+    }
+    return bodyParser.json()(req, res, next);
+});
 app.use(logger("dev"));
 // app.use(morgan('tiny'))
 
@@ -137,16 +149,31 @@ const apiLimiter = rateLimiter({
 app.use("/api/", apiLimiter);
 
 
-app.use(xss());
-app.use(mongoSanitize());
+app.use((req, res, next) => {
+    if (req.originalUrl === '/api/v1/payments/webhook') {
+        return next(); // req.body is a raw Buffer here — these sanitizers expect parsed objects
+    }
+    return xss()(req, res, next);
+});
+app.use((req, res, next) => {
+    if (req.originalUrl === '/api/v1/payments/webhook') {
+        return next();
+    }
+    return mongoSanitize()(req, res, next);
+});
 app.use(cookieParser(process.env.JWT_SECRET));
 app.use(fileUpload());
 
 
 // Parse incoming JSON requests
+// Parse incoming JSON requests
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
-
+app.use((req, res, next) => {
+    if (req.originalUrl === '/api/v1/payments/webhook') {
+        return next();
+    }
+    return express.json()(req, res, next);
+});
 
 // Routes to API's
 app.use("/api/v1/auth", authRoutes);
@@ -168,6 +195,8 @@ app.use('/api/v1/ai',aiRoutes );
 app.use('/api/v1/dashboard', require('./routes/dashboard.js'));
 app.use('/api/v1/produce', require('./routes/produce.js'));
 app.use('/api/v1/orders', require('./routes/order.js'));
+app.use('/api/v1/payments', require('./routes/payment.js'));
+app.use('/api/v1/ussd', require('./routes/ussd.js'));
 
 
 

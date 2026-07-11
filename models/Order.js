@@ -39,6 +39,10 @@ const OrderSchema = new mongoose.Schema({
         default: null,
     },
     notes: { type: String, default: null },
+    // --- payment tracking (Paystack) ---
+    paystackReference: { type: String, default: null, index: true },
+    paymentProvider: { type: String, enum: ['mtn', 'vod', 'atl', null], default: null },
+    paymentGatewayResponse: { type: String, default: null },
 }, { timestamps: true });
 
 const Order = mongoose.model("Order", OrderSchema);
