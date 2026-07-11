@@ -1,6 +1,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const Order = require('../models/Order');
+const Produce = require('../models/Produce');
 const { BadRequestError, NotFoundError, UnauthenticatedError } = require('../errors');
 const { StatusCodes } = require('http-status-codes');
 
@@ -13,108 +14,94 @@ const paystack = axios.create({
     },
 });
 
-// Paystack requires an email even for a MoMo-only charge. Most of your users
-// won't have one (phone-first signup), so we synthesize a stable placeholder
-// tied to the order — Paystack never actually emails this address.
-const emailForOrder = (order) => `order-${order._id}@seedbridge.app`;
+// Paystack requires an email even for a MoMo-only checkout. Most of your
+// users won't have one (phone-first signup), so we synthesize a stable
+// placeholder — Paystack never actually emails this address.
+const emailForBuyer = (buyerId) => `buyer-${buyerId}@seedbridge.app`;
 
 // =========================
-// POST /payments/charge
-// Kicks off a MoMo charge for an order. Works from both the web app
-// (buyer taps "Pay") and the USSD flow (see ussd.controller.js).
+// POST /payments/initialize
+// Buyer taps "Buy" on a produce listing. Instead of creating the order
+// immediately, this reserves nothing yet and just asks Paystack for a
+// hosted checkout page (authorization_url) — the order itself is only
+// created once payment actually succeeds, in finalizeOrder() below.
 // =========================
-const chargeMobileMoney = async (req, res) => {
-    const { orderId, phone, provider } = req.body;
+const initializeCheckout = async (req, res) => {
+    const { produceId, quantityKg, deliveryAddress, notes, isDeposit } = req.body;
 
-    if (!orderId || !phone || !provider) {
-        throw new BadRequestError('Please provide orderId, phone and provider (mtn, vod, or atl)');
+    if (!produceId || !quantityKg || !deliveryAddress) {
+        throw new BadRequestError('Please provide produceId, quantityKg and deliveryAddress');
     }
 
-    if (!['mtn', 'vod', 'atl'].includes(provider)) {
-        throw new BadRequestError('provider must be one of: mtn, vod, atl');
+    const produce = await Produce.findById(produceId);
+    if (!produce) {
+        throw new NotFoundError(`No produce listing with id: ${produceId}`);
     }
 
-    const order = await Order.findById(orderId);
-    if (!order) {
-        throw new NotFoundError(`No order with id: ${orderId}`);
+    if (produce.availableKg < quantityKg) {
+        throw new BadRequestError(`Only ${produce.availableKg}kg available for this listing`);
     }
 
-    if (order.paymentStatus !== 'unpaid') {
-        throw new BadRequestError(`This order is already ${order.paymentStatus}`);
+    const buyerId = req.user.userId;
+    const buyerName = req.user.name || req.user.username;
+    const totalAmount = quantityKg * produce.pricePerKg;
+    const depositAmount = isDeposit ? (produce.depositRequired || 0) : null;
+    const amountToChargeNow = isDeposit ? depositAmount : totalAmount;
+
+    if (!amountToChargeNow || amountToChargeNow <= 0) {
+        throw new BadRequestError('Nothing to charge — check depositRequired on this listing');
     }
 
-    // Amount owed: full amount, minus any deposit already paid.
-    const amountDue = order.totalAmount - (order.depositPaid || 0);
-    // Paystack expects the amount in the currency's smallest unit (pesewas for GHS).
-    const amountInPesewas = Math.round(amountDue * 100);
+    const reference = `sb_${produceId}_${buyerId}_${Date.now()}`;
 
-    const reference = `sb_${order._id}_${Date.now()}`;
+    // Everything needed to create the order later is stashed in Paystack's
+    // own metadata field — nothing touches our DB until payment succeeds.
+    const metadata = {
+        buyerId,
+        buyerName,
+        farmerId: String(produce.farmerId),
+        farmerName: produce.farmerName,
+        produceId,
+        crop: produce.crop,
+        quantityKg,
+        pricePerKg: produce.pricePerKg,
+        totalAmount,
+        depositPaid: isDeposit ? depositAmount : null,
+        deliveryAddress,
+        notes: notes || null,
+        isDeposit: !!isDeposit,
+    };
 
     let response;
     try {
-        response = await paystack.post('/charge', {
-            email: emailForOrder(order),
-            amount: amountInPesewas,
+        response = await paystack.post('/transaction/initialize', {
+            email: emailForBuyer(buyerId),
+            amount: Math.round(amountToChargeNow * 100), // pesewas
             currency: 'GHS',
             reference,
-            mobile_money: { phone, provider },
+            callback_url: `${process.env.CLIENT_URL}/payment/callback`,
+            metadata,
         });
     } catch (err) {
         const message = err.response?.data?.message || err.message;
-        throw new BadRequestError(`Payment initiation failed: ${message}`);
-    }
-
-    const data = response.data.data;
-
-    order.paystackReference = reference;
-    order.paymentProvider = provider;
-    order.paymentGatewayResponse = data.status; // e.g. "pay_offline", "send_otp", "success"
-    await order.save();
-
-    // data.status will be "send_otp" for providers (e.g. Vodafone/Telecel)
-    // that require the customer to confirm with a code, or "pay_offline"
-    // for providers (e.g. MTN) where the customer just approves on their
-    // phone — no OTP step needed on your end for the latter.
-    return res.status(StatusCodes.OK).json({
-        reference,
-        status: data.status,
-        displayText: data.display_text || null,
-    });
-};
-
-// =========================
-// POST /payments/submit-otp
-// Only needed when chargeMobileMoney returned status: "send_otp".
-// =========================
-const submitOtp = async (req, res) => {
-    const { reference, otp } = req.body;
-
-    if (!reference || !otp) {
-        throw new BadRequestError('Please provide reference and otp');
-    }
-
-    let response;
-    try {
-        response = await paystack.post('/charge/submit_otp', { reference, otp });
-    } catch (err) {
-        const message = err.response?.data?.message || err.message;
-        throw new BadRequestError(`OTP submission failed: ${message}`);
+        throw new BadRequestError(`Could not start checkout: ${message}`);
     }
 
     const data = response.data.data;
 
     return res.status(StatusCodes.OK).json({
-        reference,
-        status: data.status,
+        authorizationUrl: data.authorization_url,
+        reference: data.reference,
     });
 };
 
 // =========================
-// GET /payments/verify/:reference
-// Lets the frontend poll for the final status while waiting on the
-// customer to approve the charge on their phone.
+// GET /payments/finalize/:reference
+// The frontend calls this right after Paystack redirects the buyer back
+// to /payment/callback?reference=... — this is where the order actually
+// gets created, but only once we've verified payment truly succeeded.
 // =========================
-const verifyPayment = async (req, res) => {
+const finalizeOrder = async (req, res) => {
     const { reference } = req.params;
 
     let response;
@@ -127,38 +114,87 @@ const verifyPayment = async (req, res) => {
 
     const data = response.data.data;
 
-    if (data.status === 'success') {
-        await markOrderPaid(reference, data);
+    if (data.status !== 'success') {
+        return res.status(StatusCodes.OK).json({ success: false, status: data.status });
     }
 
-    return res.status(StatusCodes.OK).json({
-        status: data.status,
-        amount: data.amount / 100,
-    });
+    const order = await createOrderFromPaidTransaction(data);
+
+    return res.status(StatusCodes.OK).json({ success: true, order });
 };
 
-// Shared helper: marks the matching order as paid. Called from both the
-// verify endpoint (polling) and the webhook (authoritative, async).
-const markOrderPaid = async (reference, gatewayData) => {
-    const order = await Order.findOne({ paystackReference: reference });
-    if (!order) return;
 
-    if (order.paymentStatus === 'released' || order.paymentStatus === 'escrow_held') {
-        return; // already processed — webhook and poll can race, this makes it idempotent
+// Paystack returns the mobile network name in data.authorization.bank for
+// MoMo transactions (e.g. "MTN", "Vodafone", "AirtelTigo") — not lowercase,
+// and not matching our mtn/vod/atl enum values, so it needs mapping.
+const normalizeProvider = (bankName) => {
+    if (!bankName) return null;
+    const normalized = bankName.toLowerCase();
+    if (normalized.includes('mtn')) return 'mtn';
+    if (normalized.includes('vod') || normalized.includes('telecel')) return 'vod';
+    if (normalized.includes('airtel') || normalized.includes('tigo')) return 'atl';
+    return null; // unrecognized — better to store null than fail the whole order
+};
+
+// Shared helper: creates the Order from a verified Paystack transaction's
+// metadata, decrements the produce stock, and is safe to call twice —
+// both the browser callback (finalizeOrder) and the webhook can race to
+// call this for the same reference, and only the first one wins.
+const createOrderFromPaidTransaction = async (transactionData) => {
+    const existing = await Order.findOne({ paystackReference: transactionData.reference });
+    if (existing) {
+        return existing; // already created by the other path — idempotent
     }
 
-    order.paymentStatus = 'escrow_held'; // held until delivery is confirmed; adjust to your settlement flow
-    order.paymentGatewayResponse = gatewayData?.gateway_response || 'success';
-    if (order.status === 'pending') {
-        order.status = 'confirmed';
+    const m = transactionData.metadata;
+    if (!m || !m.produceId) {
+        // Not one of our checkout transactions (or metadata got stripped) — nothing to do.
+        return null;
     }
-    await order.save();
+
+    const produce = await Produce.findById(m.produceId);
+    if (!produce) {
+        return null;
+    }
+
+    const order = await Order.create({
+        buyerId: m.buyerId,
+        buyerName: m.buyerName,
+        farmerId: m.farmerId,
+        farmerName: m.farmerName,
+        produceId: m.produceId,
+        crop: m.crop,
+        quantityKg: m.quantityKg,
+        pricePerKg: m.pricePerKg,
+        totalAmount: m.totalAmount,
+        depositPaid: m.depositPaid,
+        deliveryAddress: m.deliveryAddress,
+        notes: m.notes,
+        status: 'confirmed',
+        paymentStatus: m.isDeposit ? 'deposit_held' : 'escrow_held',
+        paystackReference: transactionData.reference,
+        paymentProvider: normalizeProvider(transactionData.authorization?.bank),
+        paymentGatewayResponse: transactionData.gateway_response || 'success',
+    });
+
+    produce.availableKg -= m.quantityKg;
+    if (produce.availableKg <= 0) {
+        produce.status = 'sold_out';
+    } else if (produce.availableKg < produce.quantityKg) {
+        produce.status = 'partially_sold';
+    }
+    await produce.save();
+
+    return order;
 };
 
 // =========================
 // POST /payments/webhook
-// Paystack's authoritative notification — must read the RAW body (see
-// app.js) so the signature can be verified before trusting the payload.
+// Paystack's authoritative, async notification — must read the RAW body
+// (see app.js) so the signature can be verified before trusting the payload.
+// This exists as a safety net: if the buyer closes the tab right after
+// paying (before the browser redirect completes), the order still gets
+// created here instead of being lost.
 // =========================
 const paystackWebhook = async (req, res) => {
     const signature = req.headers['x-paystack-signature'];
@@ -177,7 +213,7 @@ const paystackWebhook = async (req, res) => {
     const event = JSON.parse(rawBody.toString('utf8'));
 
     if (event.event === 'charge.success') {
-        await markOrderPaid(event.data.reference, event.data);
+        await createOrderFromPaidTransaction(event.data);
     }
 
     // Paystack just needs a 200 to know we received it — respond immediately,
@@ -186,8 +222,7 @@ const paystackWebhook = async (req, res) => {
 };
 
 module.exports = {
-    chargeMobileMoney,
-    submitOtp,
-    verifyPayment,
+    initializeCheckout,
+    finalizeOrder,
     paystackWebhook,
 };
