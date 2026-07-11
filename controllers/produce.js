@@ -44,7 +44,15 @@ const listProduce = async (req, res) => {
     const filter = {};
     if (crop) filter.crop = crop;
     if (region) filter.region = region;
-    if (status) filter.status = status;
+    if (status === 'available') {
+        // "Available" from the marketplace's point of view means "still has
+        // stock", which includes partially_sold listings — not just ones
+        // that have never been touched. Only sold_out/cancelled/fresh_rescue
+        // etc. should actually disappear.
+        filter.status = { $in: ['available', 'partially_sold'] };
+    } else if (status) {
+        filter.status = status;
+    }
     if (farmerId) filter.farmerId = farmerId;
     if (freshnessAlert !== undefined) filter.freshnessAlert = freshnessAlert === 'true';
     if (minPrice || maxPrice) {
