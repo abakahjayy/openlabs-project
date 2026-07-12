@@ -131,8 +131,10 @@ UserSchema.methods.comparePasswords = async function (candidatePassword) {
 // `unique: true, sparse: true` — no need to redeclare them here, and doing so
 // twice can cause conflicting index definitions.
 
-UserSchema.index({ email: 1 }, { unique: true }); // Ensure unique index on email
-UserSchema.index({ username: 1 }, { unique: true }); // Ensure unique index on username
+// unique indexes on email/username/phone are already declared inline above via
+// `unique: true, sparse: true` — do not redeclare them here with a standalone
+// .index() call; a second definition without sparse:true conflicts with the
+// first and can cause syncIndexes() to silently fail at startup.
 
 const User = mongoose.model("User", UserSchema);
 module.exports = User;
