@@ -42,6 +42,13 @@ const User = require('./models/User.js');
 const { ClerkExpressRequireAuth }= require("@clerk/clerk-sdk-node");//This handles user logins  and stuff
 // console.log(ClerkExpressRequireAuth)
 
+app.use((req, res, next) => {
+    if (req.originalUrl === '/') {
+        console.log('Root POST hit — headers:', req.headers);
+    }
+    next();
+});
+
 
 const { spawn } = require('child_process');//Used to run python code with javascript
 require("./utils/passport"); // Passport configuration file
